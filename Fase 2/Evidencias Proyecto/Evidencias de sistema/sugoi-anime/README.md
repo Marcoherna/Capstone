@@ -21,6 +21,7 @@ El sistema incluye reproducción de video streaming, sincronización externa con
 
 - [Arquitectura del Sistema](#-arquitectura-del-sistema)
 - [Mapa de Microservicios y Componentes](#-mapa-de-microservicios-y-componentes)
+- [Modelo Entidad-Relación (MER)](#-modelo-entidad-relación-mer)
 - [Funcionalidades y Requerimientos Implementados](#-funcionalidades-y-requerimientos-implementados)
   - [RF-01: Catálogo y Búsqueda de Anime](#rf-01-catálogo-y-búsqueda-de-anime)
   - [RF-02: Reproducción y Streaming Multimedia](#rf-02-reproducción-y-streaming-multimedia)
@@ -101,6 +102,156 @@ flowchart TB
 | **`ms-catalogo`** | `8081` | `8081` *(Dev)* / BD `5434` *(Dev)* | `sugoi_catalogo` (PostgreSQL 17) | Catálogo de anime, géneros, gestión de episodios, streaming CDN con trazabilidad de licencias (Ley 17.336), traducción L1/L2 y sincronización con Jikan API. |
 | **`ms-interacciones`** | `8083` | `8083` *(Dev)* / BD `5435` *(Dev)* | `sugoi_interacciones` (PostgreSQL 17) | Seguimiento de progreso de visualización, favoritos enriquecidos con degradación elegante y motor algebraico de recomendaciones por Similitud de Coseno. |
 | **`libretranslate`** | `5000` | Interno *(Prod)* / `5000` *(Dev)* | `vol-libretranslate` (Modelos `en,es`) | Motor local autoalojado de traducción neuronal inglés $\rightarrow$ español para sinopsis del catálogo (RF-05). |
+
+---
+
+## 🗄️ Modelo Entidad-Relación (MER)
+
+Siguiendo el patrón **Database-per-Service (RNF-02)**, el modelo de datos se divide en **tres bases de datos PostgreSQL 17 independientes** (`sugoi_auth`, `sugoi_catalogo` y `sugoi_interacciones`). Las relaciones dentro de cada base de datos poseen integridad referencial física (`FOREIGN KEY ... ON DELETE CASCADE`), mientras que las referencias entre microservicios (`perfil_id`, `usuario_id`, `anime_id`, `episodio_id`) son **referencias lógicas** validadas en la capa de aplicación (`PerfilGuard` y clientes HTTP resilientes):
+
+```mermaid
+erDiagram
+    %% =========================================================
+    %% DOMINIO IDENTIDAD (Base de Datos: sugoi_auth)
+    %% =========================================================
+    USUARIO {
+        bigserial id PK
+        varchar email UK "NOT NULL"
+        varchar password_hash "BCrypt (costo 12)"
+        varchar nombre "NOT NULL"
+        boolean activo "DEFAULT true"
+        timestamptz ultimo_acceso
+        timestamptz creado_en
+        timestamptz actualizado_en
+    }
+
+    USUARIO_ROL {
+        bigint usuario_id PK, FK
+        varchar rol PK "USUARIO | ADMIN"
+    }
+
+    PERFIL {
+        bigserial id PK
+        bigint usuario_id FK "ON DELETE CASCADE"
+        varchar nombre "UK (usuario_id, nombre)"
+        varchar avatar "DEFAULT default"
+        boolean es_infantil "DEFAULT false (RF-09)"
+        timestamptz creado_en
+    }
+
+    CONSENTIMIENTO {
+        bigserial id PK
+        bigint usuario_id FK "ON DELETE CASCADE"
+        varchar version_terminos "Ley 19.628"
+        varchar tipo "TERMINOS | DATOS | HISTORIAL"
+        boolean aceptado "NOT NULL"
+        timestamptz aceptado_en
+        varchar ip_origen "IPv4 / IPv6"
+    }
+
+    REFRESH_TOKEN {
+        bigserial id PK
+        bigint usuario_id FK "ON DELETE CASCADE"
+        varchar token UK "NOT NULL"
+        timestamptz expira_en "NOT NULL"
+        boolean revocado "DEFAULT false"
+        timestamptz creado_en
+    }
+
+    %% =========================================================
+    %% DOMINIO CATALOGO (Base de Datos: sugoi_catalogo)
+    %% =========================================================
+    ANIME {
+        bigserial id PK
+        integer mal_id UK "MyAnimeList ID"
+        varchar titulo "NOT NULL"
+        varchar titulo_japones
+        text sinopsis "Original (EN)"
+        text sinopsis_es "Traducida L2 (ES)"
+        integer anio "1900..2100"
+        integer episodios
+        numeric puntuacion "0.00..10.00"
+        varchar imagen_key "URL / S3 Key"
+        varchar estado "EN_EMISION | FINALIZADO"
+        timestamptz creado_en
+        timestamptz actualizado_en
+    }
+
+    GENERO {
+        bigserial id PK
+        integer mal_id UK "NOT NULL"
+        varchar nombre "NOT NULL"
+        varchar nombre_es
+    }
+
+    ANIME_GENERO {
+        bigint anime_id PK, FK
+        bigint genero_id PK, FK
+    }
+
+    EPISODIO {
+        bigserial id PK
+        bigint anime_id FK "ON DELETE CASCADE"
+        integer numero "UK (anime_id, numero)"
+        varchar titulo
+        integer duracion_seg
+        varchar video_key "Clave objeto AWS S3"
+        varchar licencia "Ley 17.336 (CC-BY-3.0)"
+        varchar fuente_url "Atribucion origen"
+    }
+
+    %% =========================================================
+    %% DOMINIO INTERACCIONES (Base de Datos: sugoi_interacciones)
+    %% =========================================================
+    FAVORITO {
+        bigserial id PK
+        bigint perfil_id "Ref. logica -> PERFIL.id"
+        bigint usuario_id "Ref. logica -> USUARIO.id"
+        bigint anime_id "Ref. logica -> ANIME.id"
+        timestamptz creado_en
+    }
+
+    PROGRESO_VISUALIZACION {
+        bigserial id PK
+        bigint perfil_id "Ref. logica -> PERFIL.id"
+        bigint usuario_id "Ref. logica -> USUARIO.id"
+        bigint anime_id "Ref. logica -> ANIME.id"
+        bigint episodio_id "Ref. logica -> EPISODIO.id"
+        integer numero_episodio
+        integer segundo "Segundo actual (>= 0)"
+        integer duracion_seg
+        boolean completado "true al superar 90%"
+        timestamptz actualizado_en
+    }
+
+    RECOMENDACION {
+        bigserial id PK
+        bigint perfil_id "Ref. logica -> PERFIL.id"
+        bigint anime_id "Ref. logica -> ANIME.id"
+        double puntaje "Similitud de Coseno (0..1)"
+        integer posicion "Ranking Top-N"
+        timestamptz generado_en
+    }
+
+    %% Relaciones fisicas en sugoi_auth
+    USUARIO ||--o{ USUARIO_ROL : "posee roles"
+    USUARIO ||--|{ PERFIL : "tiene (1 a 5)"
+    USUARIO ||--o{ CONSENTIMIENTO : "audita (Ley 19.628)"
+    USUARIO ||--o{ REFRESH_TOKEN : "mantiene sesiones"
+
+    %% Relaciones fisicas en sugoi_catalogo
+    ANIME ||--o{ ANIME_GENERO : "clasificado en"
+    GENERO ||--o{ ANIME_GENERO : "agrupa"
+    ANIME ||--o{ EPISODIO : "contiene capitulos"
+
+    %% Relaciones logicas inter-servicio hacia sugoi_interacciones (RNF-02)
+    PERFIL ||..o{ FAVORITO : "marca (logica)"
+    ANIME ||..o{ FAVORITO : "referenciado en (logica)"
+    PERFIL ||..o{ PROGRESO_VISUALIZACION : "registra (logica)"
+    EPISODIO ||..o{ PROGRESO_VISUALIZACION : "reproducido en (logica)"
+    PERFIL ||..o{ RECOMENDACION : "recibe (logica)"
+    ANIME ||..o{ RECOMENDACION : "sugerido en (logica)"
+```
 
 ---
 
