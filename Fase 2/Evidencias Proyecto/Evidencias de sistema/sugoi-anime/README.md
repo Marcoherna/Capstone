@@ -65,7 +65,6 @@ flowchart TB
         DB_CAT[("db-catalogo<br>PostgreSQL 17<br>sugoi_catalogo")]
         DB_INT[("db-interacciones<br>PostgreSQL 17<br>sugoi_interacciones")]
         TRANS["libretranslate (:5000)<br>Motor Neural Local (en -> es)"]
-        RABBIT[("RabbitMQ 4<br>Perfil: pagos")]
     end
 
     subgraph Externos["Servicios Externos y Cloud"]
@@ -102,7 +101,6 @@ flowchart TB
 | **`ms-catalogo`** | `8081` | `8081` *(Dev)* / BD `5434` *(Dev)* | `sugoi_catalogo` (PostgreSQL 17) | Catálogo de anime, géneros, gestión de episodios, streaming CDN con trazabilidad de licencias (Ley 17.336), traducción L1/L2 y sincronización con Jikan API. |
 | **`ms-interacciones`** | `8083` | `8083` *(Dev)* / BD `5435` *(Dev)* | `sugoi_interacciones` (PostgreSQL 17) | Seguimiento de progreso de visualización, favoritos enriquecidos con degradación elegante y motor algebraico de recomendaciones por Similitud de Coseno. |
 | **`libretranslate`** | `5000` | Interno *(Prod)* / `5000` *(Dev)* | `vol-libretranslate` (Modelos `en,es`) | Motor local autoalojado de traducción neuronal inglés $\rightarrow$ español para sinopsis del catálogo (RF-05). |
-| **`rabbitmq`** *(opcional)* | `5672` | `5672 / 15672` *(Perfil `pagos`)* | RabbitMQ 4 Management | Mensajería asíncrona preparada para eventos de membresías y pagos. |
 
 ---
 
@@ -169,7 +167,7 @@ flowchart TB
 - **Cierre de Sesión y Derecho al Olvido:** Soporte para cerrar sesión en el dispositivo actual (`POST /api/auth/auth/logout`), revocar todas las sesiones activas (`POST /api/auth/auth/logout-todos`), eliminar permanentemente la cuenta y sus datos en cascada (`DELETE /api/auth/auth/cuenta`) y limpieza nocturna automática (`@Scheduled` a las 04:00 AM) de tokens vencidos o revocados.
 
 ### RF-09: Perfiles Familiares, Control Parental y Defensa contra IDOR
-- **Multi-perfil por Suscripción (`/api/perfiles`):** Cada cuenta soporta hasta **5 perfiles independientes**, cada uno con nombre único dentro de la cuenta, avatar personalizado y bandera `esInfantil` (base para el control parental RF-11).
+- **Multi-perfil por Cuenta (`/api/perfiles`):** Cada cuenta soporta hasta **5 perfiles independientes**, cada uno con nombre único dentro de la cuenta, avatar personalizado y bandera `esInfantil` (base para el control parental RF-11).
 - **Defensa Estricta contra IDOR (Insecure Direct Object Reference):** El identificador del titular jamás se recibe por parámetro de consulta ni cuerpo; se extrae exclusivamente del claim criptográfico `sub` del JWT autenticado, y todas las consultas/modificaciones filtran simultáneamente por `id` de perfil y `usuarioId` (`findByIdAndUsuarioId`).
 - **Regla de Integridad de Cuenta:** El sistema impide eliminar el último perfil restante de una cuenta (`409 Conflict`), garantizando que toda cuenta mantenga al menos un perfil operativo.
 - **Selector Interactivo en Frontend (`/perfiles`):** Vista dedicada para elegir quién está viendo, crear nuevos perfiles (normales o infantiles) y administrar los existentes.
@@ -179,7 +177,7 @@ flowchart TB
 - **Carga y Gestión de Capítulos con AWS S3 (`sugoianime-media`):**
   - **Subida Directa `.mp4` a AWS S3:** Implementación nativa en Java 25 ([`S3StorageService.java`](file:///home/maha/Proyectos/sugoi-anime/ms-catalogo/src/main/java/cl/sugoianime/mscatalogo/service/S3StorageService.java)) con firma criptográfica **AWS Signature Version 4 (`HMAC-SHA256`)** para subir videos `.mp4` directamente al bucket y calcular automáticamente su duración en el navegador.
   - **Explorador de Objetos S3:** Listado en tiempo real de los archivos `.mp4` existentes en el bucket S3 para asociarlos con un clic a cualquier capítulo junto con su licencia obligatoria (Ley N° 17.336).
-- **Administración de Cuentas de Usuario (`ms-auth`):** Listado de cuentas registradas, activación/bloqueo con revocación inmediata de sesiones (`RefreshToken`), cambio de roles (`USUARIO` / `ADMIN`), conmutación de plan `Premium` y eliminación de cuentas con protección contra auto-bloqueo.
+- **Administración de Cuentas de Usuario (`ms-auth`):** Listado de cuentas registradas, activación/bloqueo con revocación inmediata de sesiones (`RefreshToken`), cambio de roles (`USUARIO` / `ADMIN`) y eliminación de cuentas con protección contra auto-bloqueo.
 - **Administrador Semilla Automático:** Al iniciar `ms-auth`, [`AdminDataInitializer.java`](file:///home/maha/Proyectos/sugoi-anime/ms-auth/src/main/java/cl/sugoianime/msauth/config/AdminDataInitializer.java) aprovisiona automáticamente la cuenta administradora por defecto si no existe:
   - **Email:** `admin@sugoianime.cl`
   - **Contraseña:** `Admin1234!`
@@ -223,7 +221,6 @@ El diseño arquitectónico de SugoiAnime incorpora controles técnicos verificab
 - **Persistencia & ORM:** Spring Data JPA, Hibernate, HikariCP.
 - **Migraciones:** Flyway para versionado de esquemas relacionales.
 - **Caché:** Caffeine Cache en memoria (L1) + PostgreSQL (L2).
-- **Mensajería:** Spring AMQP + RabbitMQ 4.
 - **Documentación de API:** SpringDoc OpenAPI 3.1.0 / Swagger UI centralizado en el Gateway.
 
 ### Frontend
@@ -286,7 +283,7 @@ Todas las peticiones externas e internas del cliente se canalizan a través del 
 | Método | Ruta | Acceso | Descripción |
 |---|---|:---:|---|
 | `GET` | `/api/auth/admin/usuarios` | `ROLE_ADMIN` | Lista todas las cuentas registradas con estado, roles y cantidad de perfiles. |
-| `PUT` | `/api/auth/admin/usuarios/{id}` | `ROLE_ADMIN` | Activa/bloquea una cuenta, modifica su estado `esPremium` o asigna/revoca el rol `ADMIN`. |
+| `PUT` | `/api/auth/admin/usuarios/{id}` | `ROLE_ADMIN` | Activa/bloquea una cuenta o asigna/revoca el rol `ADMIN`. |
 | `DELETE` | `/api/auth/admin/usuarios/{id}` | `ROLE_ADMIN` | Elimina una cuenta de usuario y revoca sus tokens (protegido contra auto-eliminación). |
 
 ### Interacciones y Recomendaciones (`/api/interacciones/**`)
